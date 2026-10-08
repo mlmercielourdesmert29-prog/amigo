@@ -1,0 +1,23 @@
+{
+  "name": "Ruta de Amigo",
+  "short_name": "Amigo",
+  "description": "Guía de estudio para la clase de Amigo del Club de Conquistadores. Funciona sin Internet.",
+  "lang": "es",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F4EDDC",
+  "theme_color": "#1F4D3A",
+  "categories": ["education"],
+  "icons": [
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ],
+  "shortcuts": [
+    {"name": "Flashcards", "url": "./#/flashcards"},
+    {"name": "Simulacro", "url": "./#/simulacro"},
+    {"name": "Modo Jurado", "url": "./#/jurado"}
+  ]
+}
