@@ -1,0 +1,44 @@
+# Servidor de notificaciones del club (Ruta de Amigo). Lo ejecuta GitHub cada 10 minutos.
+# Necesita el secreto FIREBASE_CUENTA (Settings → Secrets and variables → Actions).
+name: Notificaciones del club
+
+on:
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notificaciones-del-club
+  cancel-in-progress: false
+
+jobs:
+  vuelta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Traer el servidor
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: servidor-notificaciones
+          persist-credentials: false
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: servidor-notificaciones/package-lock.json
+
+      - name: Instalar lo que necesita
+        working-directory: servidor-notificaciones
+        run: npm ci --omit=dev --no-audit --no-fund
+
+      - name: Enviar lo que toca
+        working-directory: servidor-notificaciones
+        env:
+          FIREBASE_CUENTA: ${{ secrets.FIREBASE_CUENTA }}
+          MINUTOS: '10'
+        run: node correr.js
