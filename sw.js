@@ -1,8 +1,8 @@
 /* Service worker de Ruta de Amigo. Guarda la app para usarla sin Internet.
-   construir.py reemplaza 09705e02b4 y ["./", "manifest.json", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"]. No edites publicar/sw.js a mano. */
-const VERSION = '09705e02b4';
+   construir.py reemplaza 30f052fe98 y ["./", "manifest.json", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png", "insignia-96.png"]. No edites publicar/sw.js a mano. */
+const VERSION = '30f052fe98';
 const CACHE = 'ruta-amigo-' + VERSION;
-const ARCHIVOS = ["./", "manifest.json", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"];
+const ARCHIVOS = ["./", "manifest.json", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png", "insignia-96.png"];
 const aqui = (ruta) => new URL(ruta, self.registration.scope).href;
 const INICIO = aqui('./');   // la app se guarda con la dirección de la carpeta, que es el enlace que se comparte
 const TEXTOS = aqui('textos-del-club.txt');
@@ -72,4 +72,82 @@ self.addEventListener('fetch', (e) => {
 // La página avisa cuando el usuario acepta actualizar.
 self.addEventListener('message', (e) => {
   if (e.data === 'activar') self.skipWaiting();
+});
+
+/* ---------- Notificaciones push ---------- */
+// El servidor del club manda cada aviso cifrado (Web Push). Aquí se muestra como notificación del sistema, se anota en
+// IndexedDB que llegó (la app lo pone en su bandeja y lo cuenta como «recibido» al abrirse) y, al tocarla, se abre la
+// sección correcta de la app. La notificación se muestra SIEMPRE: los navegadores lo exigen (y Safari retira la
+// suscripción si no se hace). No hay alarmas locales: sin servidor y sin Internet, una app web no puede despertarse sola.
+const BD = 'ruta-amigo-sw';
+function bdAbrir() {
+  return new Promise((ok) => {
+    try {
+      const r = indexedDB.open(BD, 1);
+      r.onupgradeneeded = () => {
+        const db = r.result;
+        if (!db.objectStoreNames.contains('eventos')) db.createObjectStore('eventos', { keyPath: 'k', autoIncrement: true });
+        if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+      };
+      r.onsuccess = () => ok(r.result);
+      r.onerror = () => ok(null);
+    } catch (err) { ok(null); }
+  });
+}
+function anotar(ev) {
+  return bdAbrir().then((db) => new Promise((ok) => {
+    if (!db) { ok(); return; }
+    try {
+      const tx = db.transaction('eventos', 'readwrite');
+      tx.objectStore('eventos').add(ev);
+      tx.oncomplete = () => ok();
+      tx.onerror = () => ok();
+    } catch (err) { ok(); }
+  }));
+}
+// El número sobre el icono de la app (Android con la app instalada, iPhone 16.4 o más): uno más por cada aviso que llega.
+function sumarInsignia() {
+  return bdAbrir().then((db) => new Promise((ok) => {
+    if (!db || !self.navigator || !self.navigator.setAppBadge) { ok(); return; }
+    try {
+      const tx = db.transaction('meta', 'readwrite'), st = tx.objectStore('meta'), r = st.get('noLeidas');
+      r.onsuccess = () => { const n = (Number(r.result) || 0) + 1; st.put(n, 'noLeidas'); self.navigator.setAppBadge(n).catch(() => {}); };
+      tx.oncomplete = () => ok();
+      tx.onerror = () => ok();
+    } catch (err) { ok(); }
+  }));
+}
+const rutaSegura = (r) => (typeof r === 'string' && r.length <= 120 && /^#\/[A-Za-z0-9/_.-]*$/.test(r) && r.indexOf('..') < 0 ? r : '#/avisos');
+self.addEventListener('push', (e) => {
+  let a = {};
+  try { a = e.data ? e.data.json() : {}; } catch (err) { a = { titulo: 'Ruta de Amigo', texto: e.data ? String(e.data.text()).slice(0, 300) : '' }; }
+  const id = String(a.id || '').slice(0, 160);
+  const aviso = { id, titulo: String(a.titulo || 'Ruta de Amigo').slice(0, 80), texto: String(a.texto || '').slice(0, 300), ruta: rutaSegura(a.ruta),
+    cat: String(a.cat || '').slice(0, 20), estilo: String(a.estilo || '').slice(0, 20), t: Number(a.t) || Date.now(), envio: String(a.envio || '').slice(0, 200) };
+  const opciones = { body: aviso.texto, icon: aqui('icon-192.png'), badge: aqui('insignia-96.png'), tag: id || 'ruta-amigo', timestamp: aviso.t, lang: 'es', data: { id, ruta: aviso.ruta, aviso } };
+  e.waitUntil(Promise.all([
+    self.registration.showNotification(aviso.titulo, opciones),
+    anotar({ tipo: 'recibida', id, t: Date.now(), aviso }),
+    sumarInsignia(),
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((ws) => ws.forEach((w) => w.postMessage({ tipo: 'push', aviso })))
+  ]).catch(() => {}));
+});
+// Al tocar la notificación: la app abierta va a la sección del aviso; si no está abierta, se abre ahí.
+// (Va en una función con nombre para poder probarlo: una prueba automática no puede «tocar» una notificación real.)
+function alTocarNotificacion(n) {
+  n.close();
+  const d = n.data || {};
+  const ruta = rutaSegura(d.ruta);
+  return anotar({ tipo: 'abierta', id: String(d.id || ''), t: Date.now(), aviso: d.aviso || null })
+    .then(() => self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
+    .then((ws) => {
+      const w = ws.filter((x) => x.url.indexOf(INICIO) === 0)[0];
+      if (w) { w.postMessage({ tipo: 'abrir', id: String(d.id || ''), ruta }); return w.focus(); }
+      return self.clients.openWindow(INICIO + ruta);
+    }).catch(() => {});
+}
+self.addEventListener('notificationclick', (e) => { e.waitUntil(alTocarNotificacion(e.notification)); });
+// El navegador renovó (o perdió) la suscripción: la app la vuelve a registrar en la base del club al abrirse.
+self.addEventListener('pushsubscriptionchange', (e) => {
+  e.waitUntil(anotar({ tipo: 'suscripcion', t: Date.now() }));
 });
