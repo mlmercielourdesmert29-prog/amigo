@@ -1,6 +1,6 @@
 /* Service worker de Ruta de Amigo. Guarda la app para usarla sin Internet.
-   construir.py reemplaza 30f052fe98 y ["./", "manifest.json", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png", "insignia-96.png"]. No edites publicar/sw.js a mano. */
-const VERSION = '30f052fe98';
+   construir.py reemplaza 1a3ea04656 y ["./", "manifest.json", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png", "insignia-96.png"]. No edites publicar/sw.js a mano. */
+const VERSION = '1a3ea04656';
 const CACHE = 'ruta-amigo-' + VERSION;
 const ARCHIVOS = ["./", "manifest.json", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png", "insignia-96.png"];
 const aqui = (ruta) => new URL(ruta, self.registration.scope).href;

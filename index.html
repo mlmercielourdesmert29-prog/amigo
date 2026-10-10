@@ -5343,6 +5343,22 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
   }
   Ct._lote = lote;
   /**
+   * Avisa al servidor de notificaciones del club de que algo cambió. Lo necesita el de GitHub Actions, que no tiene
+   * «disparadores»: revisa la colección «solicitudes» en cada vuelta. Con Cloud Functions no hace falta (los disparadores
+   * lo ven solos). tipo: 'planificar' (horarios o dispositivos), 'prueba', 'borrar' (una cuenta) o 'revision' (con el
+   * día; la deja el equipo). Solo lleva el tipo, de quién es y la hora del servidor. Nunca falla: si las reglas
+   * publicadas todavía no la admiten, el servidor lo arregla en su repaso de cada hora. Devuelve { ok } o { error }.
+   */
+  Ct.solicitar = async function (tipo, uid, dia) {
+    const sv = RA.avisos && RA.avisos.servidorPush;
+    if (!Ct.cfg || !Ct.sesion || (sv && sv.servidor === 'functions')) return { error: 'no-hace-falta' };
+    const u = uid || Ct.sesion.uid, pref = { planificar: 'p-', prueba: 't-', borrar: 'b-' }[tipo];
+    if (!pref && tipo !== 'revision') return { error: 'tipo' };
+    const datos = { tipo, uid: u };
+    if (tipo === 'revision') datos.dia = String(dia);
+    try { return await lote([{ ruta: 'solicitudes/' + (tipo === 'revision' ? 'r-' + u + '-' + datos.dia : pref + u), datos, ahora: ['t'] }]); } catch (err) { return { error: 'otro' }; }
+  };
+  /**
    * Una consulta (runQuery) dentro de una colección: { coleccion, padre ('' o 'alumnos/<uid>'), donde: [[campo, op, valor]],
    * orden: [[campo, 'desc' | 'asc']], limite }. ops: '==', '<', '<=', '>', '>='. Devuelve { ok, docs } o { ok: false, error }.
    */
@@ -5532,6 +5548,8 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     if (roto) return { error: 'red' };
     const a = await fs('DELETE', 'alumnos/' + uid);
     if (!a.ok) return { error: a.error };
+    // El registro de envíos de notificaciones de esa cuenta lo borra el servidor del club (la app no puede).
+    await Ct.solicitar('borrar', uid);
     return { ok: true };
   }
 
@@ -5973,6 +5991,8 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
         return { error: r.error };
       }
       const NOMBRES = { aprobada: 'Aprobada', repetir: 'Repetir', no: 'No aprobada' };
+      // «Repetir» o «No aprobada»: el alumno se entera por notificación (el servidor de GitHub, en su siguiente vuelta).
+      if (o.estado === 'repetir' || o.estado === 'no') await Ct.solicitar('revision', uid, dia);
       await anotar('Revisó la evidencia del día ' + dia + (alias ? ' de ' + alias : '') + ': ' + NOMBRES[o.estado], uid);
       return { ok: true, rev: datos };
     },
@@ -6088,6 +6108,12 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     await negado('Anotar un envío de notificación (cosa del servidor)', () => fs('PATCH', 'envios/_comprobacion', { uid, estado: 'enviado' }), () => fs('DELETE', 'envios/_comprobacion'));
     // Con una máscara: si las reglas estuvieran mal, solo se habría añadido un campo suelto (y se quita enseguida).
     await negado('Cambiar la configuración del servidor de notificaciones', () => fs('PATCH', 'config/push', { comprobacion: t }, { 'updateMask.fieldPaths': ['comprobacion'] }), () => fs('PATCH', 'config/push', {}, { 'updateMask.fieldPaths': ['comprobacion'] }));
+    await negado('Leer las claves del servidor de notificaciones (config/servidor)', () => fs('GET', 'config/servidor'));
+    await negado('Leer las solicitudes que recibe el servidor de notificaciones', () => fs('GET', 'solicitudes', null, { pageSize: 1 }));
+    await negado('Dejar una solicitud al servidor a nombre de otra persona', () => lote([{ ruta: 'solicitudes/p-' + ajeno, datos: { tipo: 'planificar', uid: ajeno }, ahora: ['t'] }]),
+      () => lote([{ ruta: 'solicitudes/p-' + ajeno, borrar: true }]));
+    // Esta sí debe poder (la usa la app cuando cambian sus horarios); el servidor solo vuelve a planificar sus recordatorios.
+    await permitido('Avisar al servidor de notificaciones de un cambio en mis horarios', () => lote([{ ruta: 'solicitudes/p-' + uid, datos: { tipo: 'planificar', uid }, ahora: ['t'] }]));
     if (s.rol !== 'admin') {
       await negado('Leer la bandeja de notificaciones de otra persona', () => fs('GET', 'alumnos/' + ajeno + '/avisos', null, { pageSize: 1 }));
       await negado('Ver los dispositivos de otra persona', () => fs('GET', 'alumnos/' + ajeno + '/dispositivos', null, { pageSize: 1 }));
@@ -6558,8 +6584,10 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
      · Recordatorios automáticos: los decide avisos-motor.js con los datos reales del alumno. La app los pone en la
        bandeja cuando le toca (y aunque no haya Internet); el servidor del club, si está activo, los manda además
        como notificación del sistema. Los dos usan la misma clave: nunca se duplican.
-     · Notificaciones del sistema (push): llegan con la app cerrada. Necesitan el servidor del club (Cloud Functions),
-       permiso del alumno y un navegador que las admita. Si algo falta, se dice; no se finge.
+     · Notificaciones del sistema (push): llegan con la app cerrada. Necesitan el servidor del club (Cloud Functions,
+       que revisa cada minuto, o GitHub Actions, que revisa cada 10), permiso del alumno y un navegador que las
+       admita. Si algo falta, se dice; no se finge. El servidor de GitHub no tiene «disparadores»: cuando algo cambia
+       aquí (horarios, dispositivos, una prueba), la app le deja una solicitud (RA.central.solicitar).
    Nada de esto decide permisos: los decide el servidor con sus reglas (firebase/firestore.rules). */
 (function () {
   'use strict';
@@ -6575,7 +6603,10 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
   // pide entera (60 días) solo la primera vez en el dispositivo y una vez al día; en las demás copias, solo los últimos
   // 7 días, y como mucho cada 5 minutos. Con la app abierta se copia cada 10 minutos (y al volver a ella).
   const VENTANA = 7 * 864e5, LISTA_CADA = 5 * 60000, COPIA_CADA = 10 * 60000;
-  const VIVO = 15 * 60000;         // el servidor de notificaciones late cada 5 minutos: 15 sin latir = no responde
+  // ¿Cuánto puede pasar sin que el servidor de notificaciones lata antes de decir que no responde? Cloud Functions late
+  // cada 5 minutos (15 sin latir = no responde); el de GitHub, en cada vuelta (cada 10 minutos, y GitHub a veces se
+  // retrasa): seis vueltas sin latir, una hora.
+  const vivoMs = (s) => Math.max(15, (s.minutos || 1) * 6) * 60000;
   const ESTADO_CADA = 30000;       // el estado de estudio se sube como mucho cada 30 segundos
   const CAMPOS = ['origen', 'cat', 'estilo', 'tipo', 'titulo', 'texto', 'ruta', 'tema', 'creado', 'visibleDesde', 'expira', 'autorNombre', 'avisoId', 'envioId', 'leida', 'abierta', 'archivada', 'oculta', 'recibida', 'push', 'cancelado'];
   const MARCAS = ['leida', 'abierta', 'archivada', 'oculta', 'recibida'];
@@ -6857,7 +6888,7 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
   /* ---------- Copia en la base del club ---------- */
   let sincEnCurso = null, reloj = null, ultimaSync = 0, ultimaLista = 0;
   let prefsDe = '';   // la cuenta cuyas preferencias ya se compararon con las de la base del club en esta sesión
-  A.servidorPush = null;   // { vapid, activo, latido (ms), region, version } o null si no se sabe; { falta: true } si no existe
+  A.servidorPush = null;   // { vapid, activo, latido (ms), region, version, minutos, servidor } o null si no se sabe; { falta: true } si no existe
   const subido = () => json(lee(CLAVE_SUB) || 'null') || {};
   const ponSubido = (o) => pon(CLAVE_SUB, JSON.stringify(Object.assign(subido(), o)));
   function programarSync(espera) {
@@ -6956,6 +6987,7 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
       // OTRA cuenta no se usan ni se suben (las de antes de tener cuenta, sí: son de quien la creó aquí).
       // Si la cuenta ya tiene preferencias y las de este dispositivo no son suyas (de antes de entrar), mandan las de la cuenta.
       const s = subido(), p = A.prefs(), de = lee(CLAVE_PREFS_DE) || '', mias = de === uid;
+      let subioPrefs = false;
       // Sin revisar la base: si solo cambiaron aquí (y son de esta cuenta), se suben sin preguntar.
       const rp = revisar || !mias ? await C._fs('GET', base + '/notif/prefs') : { ok: true, doc: null };
       if (rp.ok && rp.doc && (!mias || ms(rp.doc.datos.t) > ms(p.t))) {
@@ -6969,9 +7001,10 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
         descartados = {};
       } else if ((rp.ok || rp.error === 'no-existe') && p.t && (s.prefs !== p.t || s.uid !== uid)) {
         const w = await C._fs('PATCH', base + '/notif/prefs', { json: JSON.stringify(p), t: p.t || iso() });
-        if (w.ok) ponSubido({ prefs: p.t, uid });
+        if (w.ok) { ponSubido({ prefs: p.t, uid }); subioPrefs = true; }
       }
       if (rp.ok || rp.error === 'no-existe') { prefsDe = uid; pon(CLAVE_PREFS_DE, uid); if (subido().uid !== uid) ponSubido({ uid }); }
+      if (subioPrefs) await C.solicitar('planificar');   // el servidor de GitHub replanifica sus recordatorios
       // 5. Estado de estudio para los recordatorios del servidor: solo si cambió, y como mucho cada 30 segundos (si
       // cambió antes, se sube al cumplirse). Así, lo que el alumno acaba de hacer no le llega como recordatorio.
       try {
@@ -7102,14 +7135,15 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     if (!d.id || !/^[A-Za-z0-9_-]{6,40}$/.test(d.id)) { ponDisp({ id: 'd' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4) }); d = disp(); }
     return d.id;
   };
-  /** Lee config/push: la clave pública del servidor del club y su último latido. */
+  /** Lee config/push: la clave pública del servidor del club, su último latido, cada cuánto revisa y cuál es. */
   P.leerServidor = async function () {
     const C = Ct();
     if (!C || !C.cfg) { A.servidorPush = null; return null; }
     const r = await C._fs('GET', 'config/push', null, null, { sinSesion: true });
     if (r.ok) {
       const d = r.doc.datos;
-      A.servidorPush = { vapid: typeof d.vapid === 'string' ? d.vapid : '', activo: d.activo === true, latido: ms(d.latido), region: texto(d.region, 40), version: texto(d.version, 40), leido: Date.now() };
+      A.servidorPush = { vapid: typeof d.vapid === 'string' ? d.vapid : '', activo: d.activo === true, latido: ms(d.latido), region: texto(d.region, 40), version: texto(d.version, 40),
+        minutos: Math.max(1, Math.min(60, Math.round(Number(d.minutos)) || 1)), servidor: d.servidor === 'github' ? 'github' : d.servidor === 'functions' || d.region ? 'functions' : texto(d.servidor, 20), leido: Date.now() };
     } else if (r.error === 'no-existe') A.servidorPush = { falta: true, leido: Date.now() };
     // Sin permiso para leerlo: las reglas publicadas en Firebase son de antes de las notificaciones (hay que volver a
     // publicarlas). Para el alumno es lo mismo que no tener servidor.
@@ -7121,8 +7155,11 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     const s = A.servidorPush;
     if (!s) return 'desconocido';
     if (s.falta || !s.vapid) return 'sin-servidor';
-    return s.activo && Date.now() - s.latido < VIVO ? 'activo' : 'dormido';
+    return s.activo && Date.now() - s.latido < vivoMs(s) ? 'activo' : 'dormido';
   };
+  /** ¿El servidor revisa cada varios minutos (el de GitHub Actions)? Entonces las notificaciones llegan con algo de demora. */
+  P.lento = () => !!(A.servidorPush && !A.servidorPush.falta && A.servidorPush.minutos > 2);
+  P.minutos = () => (A.servidorPush && A.servidorPush.minutos) || 1;
   /**
    * Cómo están las notificaciones en este dispositivo, para la pantalla:
    * 'sin-base', 'sin-sesion', 'archivo', 'sin-sw', 'ios-viejo', 'ios-instalar', 'no', 'sin-servidor', 'dormido', 'desconocido',
@@ -7166,6 +7203,7 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     const r = await C._fs('PATCH', 'alumnos/' + C.sesion.uid + '/dispositivos/' + id, datos);
     if (!r.ok) return { error: r.error };
     ponDisp({ uid: C.sesion.uid, activo: true, endpoint: datos.endpoint, clave: vapid, creado: datos.creado, visto: datos.visto, invalido: false });
+    await C.solicitar('planificar');   // con un dispositivo nuevo, el servidor de GitHub planifica sus recordatorios
     return { ok: true };
   }
   /**
@@ -7210,6 +7248,7 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     if (C && C.sesion && d.uid === C.sesion.uid) {
       const r = await C._fs('DELETE', 'alumnos/' + C.sesion.uid + '/dispositivos/' + P.id());
       if (!r.ok && r.error !== 'no-existe') error = r.error;
+      else await C.solicitar('planificar');
     }
     ponDisp({ activo: false, uid: '', endpoint: '', invalido: false });
     avisarCambio();
@@ -7243,6 +7282,7 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     if (!C || !C.sesion) return { error: 'sin-sesion' };
     if (did === disp().id) return P.desactivar();
     const r = await C._fs('DELETE', 'alumnos/' + C.sesion.uid + '/dispositivos/' + did);
+    if (r.ok) await C.solicitar('planificar');
     return r.ok || r.error === 'no-existe' ? { ok: true } : { error: r.error };
   };
   /**
@@ -7254,8 +7294,9 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     const C = Ct(), d = disp();
     if (!C || !C.sesion || !d.activo || d.uid !== C.sesion.uid || P.soporte() !== 'si') return;
     if (P.permiso() !== 'granted') {
-      await C._fs('DELETE', 'alumnos/' + C.sesion.uid + '/dispositivos/' + P.id());
+      const r = await C._fs('DELETE', 'alumnos/' + C.sesion.uid + '/dispositivos/' + P.id());
       ponDisp({ activo: false, uid: '' });
+      if (r.ok) await C.solicitar('planificar');
       return;
     }
     const sv = A.servidorPush;
@@ -7283,6 +7324,8 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
    * Pide al servidor una notificación de prueba y espera el resultado (hasta 45 segundos):
    * { ok, estado: 'recibida' (llegó a este dispositivo) | 'aceptada' (el servicio de notificaciones la aceptó) | 'fallida', detalle }
    * o { error } ('espera' si hay que esperar 30 segundos entre pruebas, 'sin-respuesta' si el servidor no contestó).
+   * Con un servidor que revisa cada varios minutos (GitHub Actions) no se espera: devuelve { ok, estado: 'lenta', req,
+   * minutos } y el resultado se ve después en la bandeja (prueba-<req>), cuando llega.
    */
   P.probar = async function (alAvanzar) {
     const C = Ct();
@@ -7291,6 +7334,12 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     const req = Date.now().toString(36) + Math.random().toString(36).slice(2, 8), id = 'prueba-' + req, ruta = 'alumnos/' + C.sesion.uid + '/avisos/' + id;
     const w = await C._lote([{ ruta: 'alumnos/' + C.sesion.uid + '/notif/prueba', datos: { disp: P.id(), req }, ahora: ['pedida'] }]);
     if (!w.ok) return { error: w.error === 'permiso' ? 'espera' : w.error };
+    const sol = await C.solicitar('prueba');
+    if (P.lento()) {
+      // Sin la solicitud, el servidor de GitHub no se enteraría: si las reglas publicadas no la admiten, se dice.
+      if (sol.error === 'permiso') return { error: 'reglas-viejas' };
+      return { ok: true, estado: 'lenta', req, minutos: P.minutos() };
+    }
     if (alAvanzar) alAvanzar('pedida');
     const tope = Date.now() + 45000;
     let aceptada = null;
@@ -7311,6 +7360,20 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
       } else if (r.error === 'red') return { error: 'red' };
     }
     return aceptada ? { ok: true, estado: 'aceptada', item: aceptada } : { error: 'sin-respuesta' };
+  };
+  /**
+   * Cómo va una prueba pedida en modo lento: 'esperando' (todavía nada), 'recibida' (llegó a este dispositivo),
+   * 'aceptada' (el servidor la envió y el servicio de notificaciones la aceptó, pero aquí no se vio llegar) o
+   * 'fallida' (con el motivo). Lo que haya en la bandeja de este dispositivo es lo que se sabe.
+   */
+  P.comoVaLaPrueba = function (req) {
+    const x = A.item('prueba-' + req);
+    if (!x) return { estado: 'esperando' };
+    if (x.recibida) return { estado: 'recibida', item: x };
+    const est = x.push && x.push.estado;
+    if (est === 'fallida' || est === 'sin-dispositivos' || est === 'omitida') return { estado: 'fallida', item: x, detalle: x.push.motivo || '' };
+    if (est === 'aceptada') return { estado: 'aceptada', item: x };
+    return { estado: 'esperando', item: x };
   };
 
   /* ---------- Arranque ---------- */
@@ -13717,7 +13780,7 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
   function nombreZona(z) { const x = ZONAS.filter((y) => y[0] === z)[0]; return x ? x[1] : z.replace(/_/g, ' '); }
 
   /* --- Notificaciones de este dispositivo --- */
-  let prueba = null;          // { estado: 'pidiendo'|'pedida'|'aceptada'|'recibida'|'fallida'|'error', detalle }
+  let prueba = null;          // { estado: 'pidiendo'|'pedida'|'aceptada'|'recibida'|'fallida'|'error'|'lenta', detalle, req, minutos }
   let ocupado = false;
   let disps = null;           // { lista } | { error } | null (sin pedir)
   let revisandoServidor = false;
@@ -13728,7 +13791,8 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
   const ERRORES = { denegado: 'Bloqueaste las notificaciones para esta app. Abajo te explicamos cómo volver a permitirlas.', 'sin-respuesta': 'No respondiste al permiso. Vuelve a tocar el botón cuando quieras.',
     'sin-sw': 'La app todavía no terminó de guardarse en este dispositivo. Espera unos segundos y vuelve a intentarlo.', servicio: 'El servicio de notificaciones del teléfono no respondió. Revisa tu Internet e inténtalo otra vez.',
     suscripcion: 'El navegador no pudo registrar este dispositivo para recibir notificaciones.', 'sin-servidor': 'El servidor de notificaciones del club todavía no está instalado.',
-    dormido: 'El servidor de notificaciones del club no está respondiendo.', espera: 'Espera 30 segundos entre una prueba y otra.', 'sin-respuesta-servidor': 'El servidor no respondió.' };
+    dormido: 'El servidor de notificaciones del club no está respondiendo.', espera: 'Espera 30 segundos entre una prueba y otra.', 'sin-respuesta-servidor': 'El servidor no respondió.',
+    'reglas-viejas': 'El servidor del club no puede recibir el pedido: las reglas de seguridad publicadas en Firebase son de antes de este servidor. Avísale a quien administra la app (tiene que volver a publicar firestore.rules).' };
   RA.acciones['avp-push-activar'] = async (el) => {
     if (ocupado) return;
     ocupado = true; el.disabled = true; el.textContent = 'Activando…';
@@ -13748,10 +13812,12 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
   };
   RA.acciones['avp-push-probar'] = async (el) => {
     if (prueba && ['pidiendo', 'pedida', 'aceptada'].indexOf(prueba.estado) > -1) return;
+    // Una prueba lenta recién pedida: no se pide otra enseguida (las reglas dejan una cada 30 segundos).
+    if (prueba && prueba.estado === 'lenta' && Date.now() - (prueba.desde || 0) < 30000) { RA.ui.aviso(ERRORES.espera); return; }
     prueba = { estado: 'pidiendo' };
     RA.pintar();
     const r = await A.push.probar((paso) => { prueba = { estado: paso }; if (/^#\/avisos\/ajustes/.test(location.hash)) RA.pintar(); });
-    prueba = r.ok ? { estado: r.estado, detalle: r.detalle || '' } : { estado: 'error', detalle: r.error === 'sin-respuesta' ? 'sin-respuesta-servidor' : r.error };
+    prueba = r.ok ? { estado: r.estado, detalle: r.detalle || '', req: r.req || '', minutos: r.minutos || 0, desde: Date.now() } : { estado: 'error', detalle: r.error === 'sin-respuesta' ? 'sin-respuesta-servidor' : r.error };
     if (/^#\/avisos\/ajustes/.test(location.hash) && !RA.ui.capaAbierta()) RA.pintar();
   };
   RA.acciones['avp-push-desconectar'] = async (el) => {
@@ -13775,7 +13841,8 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     let cuerpo = '';
     const boton = (a, t, clase, icono) => '<button type="button" class="boton ' + (clase || '') + '" data-a="' + a + '">' + (icono ? ic(icono, 18) : '') + t + '</button>';
     if (s === 'activo') {
-      cuerpo = '<div class="nota" id="avp-push-ok">' + ic('check', 18) + '<span><b>Activadas en este dispositivo.</b> Te llegan aunque la app esté cerrada (con Internet). Cada aviso queda además en tu centro.</span></div>' +
+      const lento = A.push.lento() ? ' El servidor del club revisa cada ' + A.push.minutos() + ' minutos, así que pueden llegar unos minutos después de la hora.' : '';
+      cuerpo = '<div class="nota" id="avp-push-ok">' + ic('check', 18) + '<span><b>Activadas en este dispositivo.</b> Te llegan aunque la app esté cerrada (con Internet). Cada aviso queda además en tu centro.' + lento + '</span></div>' +
         '<div class="fila envolver">' + boton('avp-push-probar', 'Enviar una notificación de prueba', 'sec chico', 'enviar') + boton('avp-push-desactivar', 'Desactivar aquí', 'fantasma chico') + '</div>' + resultadoPrueba();
     } else if (s === 'listo' || s === 'invalido') {
       cuerpo = '<p>' + (s === 'invalido' ? 'Este dispositivo dejó de recibir notificaciones (el servicio de notificaciones retiró la suscripción, algo que pasa a veces). Actívalas otra vez:' : 'Recibe tus recordatorios y los avisos del Club aunque la app esté cerrada. Primero tu navegador te preguntará si das permiso.') + '</p>' +
@@ -13825,6 +13892,18 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
   }
   function resultadoPrueba() {
     if (!prueba) return '';
+    // Con el servidor de GitHub la prueba no se espera aquí: llega en la próxima vuelta del servidor. Lo que se sabe
+    // está en la bandeja (se pone al llegar la notificación o al sincronizar).
+    if (prueba.estado === 'lenta') {
+      const v = A.push.comoVaLaPrueba(prueba.req);
+      if (v.estado === 'recibida' || v.estado === 'fallida') prueba = { estado: v.estado, detalle: v.detalle || '' };
+      else {
+        const min = prueba.minutos || A.push.minutos();
+        const txt = v.estado === 'aceptada' ? 'El servidor del club ya la envió y el servicio de notificaciones la aceptó. Si no la ves, revisa que el teléfono no esté en «No molestar» y que el permiso siga dado.'
+          : 'Prueba pedida. El servidor de notificaciones del club revisa cada ' + min + ' minutos (a veces GitHub tarda un poco más): debería llegarte en los próximos ' + min + ' a ' + (min * 2) + ' minutos. Puedes cerrar la app; llega igual.';
+        return '<p class="resultado" id="avp-prueba" data-estado="lenta" data-paso="' + v.estado + '" role="status">' + e(txt) + '</p>';
+      }
+    }
     const T = {
       pidiendo: ['', 'Pidiendo la prueba al servidor…'], pedida: ['', 'El servidor recibió la petición. Enviando…'],
       aceptada: ['', 'El servicio de notificaciones aceptó el envío. Si en unos segundos no ves la notificación, revisa que el teléfono no esté en «No molestar» y que el permiso siga dado.'],
@@ -14195,7 +14274,7 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     const g = grupos[filtroCA] || [];
     h += '<div class="pila g8" id="ca-lista">' + (g.length ? g.map(filaAviso).join('') : '<p class="suave" role="status">' + ({ activos: 'Todavía no hay avisos enviados ni programados.', borradores: 'No hay borradores.', cancelados: 'No hay avisos cancelados.' }[filtroCA]) + '</p>') + '</div>';
     const sv = A.push.servidor();
-    h += '<div class="nota">' + ic('info', 18) + '<span>Cada aviso queda en el centro de notificaciones de cada destinatario. ' + (sv === 'activo' ? 'El servidor de notificaciones está activo: además llega como notificación del sistema a quien la tiene activada.' : 'El servidor de notificaciones del club no está activo: los alumnos lo verán al abrir la app (no como notificación del sistema).') + '</span></div>';
+    h += '<div class="nota">' + ic('info', 18) + '<span>Cada aviso queda en el centro de notificaciones de cada destinatario. ' + (sv === 'activo' ? 'El servidor de notificaciones está activo: además llega como notificación del sistema a quien la tiene activada' + (A.push.lento() ? ' (el servidor revisa cada ' + A.push.minutos() + ' minutos: puede tardar ese rato en llegar).' : '.') : 'El servidor de notificaciones del club no está activo: los alumnos lo verán al abrir la app (no como notificación del sistema).') + '</span></div>';
     return h;
   }
   /** Quién lo recibió y quién lo leyó: se lee la copia de cada destinatario. */
@@ -14278,11 +14357,16 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     let h = '<div class="fila envolver"><button type="button" class="boton fantasma chico" data-a="dg-actualizar">' + ic('repetir', 16) + 'Actualizar</button></div>';
     const est = A.push.servidor(), s = A.servidorPush;
     const T = { activo: ['e3', 'Activo'], dormido: ['e1', 'No responde'], 'sin-servidor': ['', 'No instalado'], desconocido: ['', 'Comprobando…'] };
-    h += '<section class="tarjeta pila g8" id="dg-servidor" data-estado="' + est + '"><h2>Servidor de notificaciones</h2><p><span class="etiqueta ' + T[est][0] + '">' + T[est][1] + '</span></p>' +
+    const github = !!(s && s.servidor === 'github'), min = A.push.minutos();
+    h += '<section class="tarjeta pila g8" id="dg-servidor" data-estado="' + est + '" data-servidor="' + e((s && s.servidor) || '') + '"><h2>Servidor de notificaciones</h2><p><span class="etiqueta ' + T[est][0] + '">' + T[est][1] + '</span>' +
+      (s && !s.falta && s.servidor ? ' <span class="etiqueta">' + (github ? 'GitHub Actions' : 'Cloud Functions') + '</span>' : '') + '</p>' +
       (est === 'sin-servidor' && s && s.sinReglas ? '<p class="nota aviso pequeno">' + ic('info', 16) + '<span>Las reglas de seguridad publicadas en Firebase son de antes de las notificaciones: vuelve a publicar <b>firebase/firestore.rules</b> (Firestore, Reglas). Hasta entonces, la bandeja de cada alumno se queda solo en su dispositivo.</span></p>' : '') +
-      (est === 'sin-servidor' ? '<p class="pequeno">Las Cloud Functions del club todavía no están instaladas (necesitan el plan Blaze de Firebase). Mientras tanto, los recordatorios y los avisos del Club funcionan dentro de la app. Los pasos están en firebase/LEEME.md, sección «Notificaciones».</p>'
-        : s && !s.falta ? '<p class="pequeno">Última señal: <b>' + e(s.latido ? A.cuando(s.latido) : 'nunca') + '</b> (late cada 5 minutos; revisa los envíos cada minuto).' + (s.version ? '<br>Versión: ' + e(s.version) : '') + (s.region ? '<br>Región: ' + e(s.region) : '') + '</p>' : '') +
-      (est === 'dormido' ? '<p class="nota aviso pequeno">' + ic('info', 16) + '<span>Si no late: revisa en la consola de Firebase que la cuenta siga en el plan Blaze y mira los registros de las funciones (Functions, Registros).</span></p>' : '') + '</section>';
+      (est === 'sin-servidor' ? '<p class="pequeno">El servidor de notificaciones del club todavía no está instalado. Hay dos formas: <b>GitHub Actions</b> (gratis, sin tarjeta; revisa cada 10 minutos; pasos en github/LEEME.md) o <b>Cloud Functions</b> (plan Blaze de Firebase; revisa cada minuto; pasos en firebase/LEEME.md). Mientras tanto, los recordatorios y los avisos del Club funcionan dentro de la app.</p>'
+        : s && !s.falta ? '<p class="pequeno">Última señal: <b>' + e(s.latido ? A.cuando(s.latido) : 'nunca') + '</b> ' +
+          (github ? '(GitHub lo corre cada ' + min + ' minutos y late en cada vuelta; cuando GitHub está muy ocupado puede retrasarse unos minutos).' : '(late cada 5 minutos; revisa los envíos cada minuto).') +
+          (s.version ? '<br>Versión: ' + e(s.version) : '') + (s.region ? '<br>Región: ' + e(s.region) : '') + '</p>' : '') +
+      (est === 'dormido' ? '<p class="nota aviso pequeno">' + ic('info', 16) + '<span>' + (github ? 'Si no late: en GitHub, abre el repositorio de la app, pestaña <b>Actions</b>, «Notificaciones del club». Mira si la última vuelta falló (ahí dice por qué) o si GitHub pausó el flujo (después de 60 días sin cambios en el repositorio lo pausa: botón <b>Enable workflow</b>). Pasos en github/LEEME.md.'
+        : 'Si no late: revisa en la consola de Firebase que la cuenta siga en el plan Blaze y mira los registros de las funciones (Functions, Registros).') + '</span></p>' : '') + '</section>';
     if (!sv) return h + H().espera('config-push', 'Comprobando el servidor…');
     if (est === 'sin-servidor') return h;
     const l = H().pedir('envios', leerEnvios);
@@ -14295,12 +14379,15 @@ window.RA_IMG = {"flores/cardo-santo.webp": "data:image/webp;base64,UklGRhhzAABX
     const p95 = demoras.length ? Math.round(demoras[Math.min(demoras.length - 1, Math.floor(demoras.length * 0.95))] / 1000) : 0;
     let disOk = 0, disMal = 0, caducas = 0;
     lista.forEach((x) => { const d = x.disp && typeof x.disp === 'object' ? x.disp : {}; Object.keys(d).forEach((k) => { const v = d[k] || {}; if (v.estado === 'aceptada') disOk++; else if (v.estado === 'expirada') { caducas++; disMal++; } else if (v.estado) disMal++; }); });
-    const atascados = cuenta((x) => x.estado === 'procesando' && ahora - ms(x.procesado) > 5 * 60000) + cuenta((x) => x.estado === 'pendiente' && ahora - ms(x.programado) > 5 * 60000);
+    // «Atascado»: lo que lleva más de tres vueltas del servidor sin procesarse (5 minutos con Cloud Functions; con GitHub, 30).
+    const tope = Math.max(5, 3 * A.push.minutos()) * 60000;
+    const atascados = cuenta((x) => x.estado === 'procesando' && ahora - ms(x.procesado) > tope) + cuenta((x) => x.estado === 'pendiente' && ahora - ms(x.programado) > tope);
+    const seg = (n) => (n < 120 ? n + ' s' : Math.round(n / 60) + ' min');
     const cifras = [['Programados', cuenta((x) => x.estado === 'pendiente')], ['Procesados', procesados.length], ['Aceptados por el servicio', disOk], ['Envíos fallidos', cuenta((x) => x.estado === 'fallido' || x.estado === 'parcial')],
       ['Cancelados u omitidos', cuenta((x) => ['cancelado', 'omitido', 'sin-dispositivos'].indexOf(x.estado) > -1)], ['Abiertos', cuenta((x) => x.abierta)], ['Leídos', cuenta((x) => x.leida)],
-      ['Demora media', media + ' s'], ['Demora (95 %)', p95 + ' s'], ['Suscripciones caducadas', caducas], ['Atascados', atascados]];
+      ['Demora media', seg(media)], ['Demora (95 %)', seg(p95)], ['Suscripciones caducadas', caducas], ['Atascados', atascados]];
     h += '<section class="tarjeta pila g8" id="dg-cifras"><h2>Los últimos ' + lista.length + ' envíos</h2><div class="ca-cifras">' + cifras.map((c) => '<div class="ca-cifra"><b>' + c[1] + '</b><span class="pequeno">' + e(c[0]) + '</span></div>').join('') + '</div>' +
-      '<p class="suave pequeno">La demora es lo que tardó el servidor en procesar cada envío desde su hora prevista (revisa cada minuto). La entrega final al teléfono la hacen Google, Apple o Mozilla y puede tardar más: el teléfono puede estar sin Internet, en ahorro de batería o en «No molestar». «Abierto» y «Leído» se saben cuando la app del alumno se sincroniza.</p></section>';
+      '<p class="suave pequeno">La demora es lo que tardó el servidor en procesar cada envío desde su hora prevista (revisa cada ' + (A.push.minutos() > 1 ? A.push.minutos() + ' minutos' : 'minuto') + '). La entrega final al teléfono la hacen Google, Apple o Mozilla y puede tardar más: el teléfono puede estar sin Internet, en ahorro de batería o en «No molestar». «Abierto» y «Leído» se saben cuando la app del alumno se sincroniza.</p></section>';
     const estados = Object.keys(ESTADOS_ENVIO).filter((k) => cuenta((x) => x.estado === k));
     const vis = filtroDg ? lista.filter((x) => x.estado === filtroDg) : lista;
     h += '<section class="tarjeta pila g8" id="dg-lista"><h2>Registro</h2><div class="chips rueda"><button type="button" class="chip" aria-pressed="' + !filtroDg + '" data-a="dg-filtro" data-v="">Todos</button>' +

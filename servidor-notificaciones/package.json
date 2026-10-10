@@ -1,0 +1,14 @@
+{
+  "name": "servidor-notificaciones-del-club",
+  "private": true,
+  "description": "Servidor de notificaciones del club (Ruta de Amigo) en GitHub Actions: recordatorios automáticos, avisos del Club, pruebas y avisos de evidencias como notificaciones push (Web Push). Lo corre .github/workflows/notificaciones.yml cada 10 minutos.",
+  "main": "correr.js",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "vuelta": "node correr.js"
+  },
+  "dependencies": {
+    "firebase-admin": "14.5.0",
+    "web-push": "3.6.7"
+  }
+}
